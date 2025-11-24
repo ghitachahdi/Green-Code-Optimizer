@@ -11,5 +11,5 @@ pandas
 numpy
 codecarbon
 python-dotenv
-
+chromadb
 

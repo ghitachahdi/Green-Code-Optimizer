@@ -2,7 +2,6 @@ from __future__ import annotations
 import os, tempfile, time, traceback, runpy, json, csv, re, statistics, unicodedata, requests, pathlib, hashlib
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
-from chromadb import Client
 from langchain_community.vectorstores import Chroma
 import pandas as pd
 import streamlit as st
