@@ -2,7 +2,14 @@ streamlit>=1.36
 psutil>=5.9
 requests>=2.31
 codecarbon
-eco2ai
+eco2ai==0.3.12
 tracarbon
 streamlit-ace>=0.1.1
+streamlit
+streamlit-ace
+pandas
+numpy
+codecarbon
+python-dotenv
+
 
