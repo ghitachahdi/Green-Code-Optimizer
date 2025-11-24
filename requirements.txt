@@ -16,3 +16,4 @@ langchain-community==0.3.7
 chromadb
 pypdf
 html2text
+langchain-nvidia-ai-endpoints
