@@ -2,15 +2,14 @@ from __future__ import annotations
 import os, tempfile, time, traceback, runpy, json, csv, re, statistics, unicodedata, requests, pathlib, hashlib
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
-
+from chromadb import Client
+from langchain_community.vectorstores import Chroma
 import pandas as pd
 import streamlit as st
 from streamlit_ace import st_ace
 import numpy as np
-import faiss  # pip install faiss-cpu
 from pypdf import PdfReader       # pip install pypdf
 import html2text                  # pip install html2text
-from langchain_community.vectorstores import FAISS
 from langchain_nvidia_ai_endpoints import ChatNVIDIA, NVIDIAEmbeddings
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -620,6 +619,7 @@ def _hetero_ingest_files(dirpath: str) -> List[str]:
 
 def _hetero_build_vs(chunks: List[str]):
     emb = _get_global_emb()
+
     cleaned = []
     for t in chunks:
         t = re.sub(r"\s+", " ", (t or "")).strip()
@@ -628,32 +628,40 @@ def _hetero_build_vs(chunks: List[str]):
         if t:
             cleaned.append(t)
 
-    # ❌ Plus de “règles par défaut” si aucune source
     if not cleaned:
-        return {"index": None, "chunks": [], "emb": emb}
+        return {"retriever": None, "chunks": [], "emb": emb}
 
-    vecs = [_embed_text_token_safe(emb, t) for t in cleaned]
-    X = np.array(vecs, dtype="float32")
-    faiss.normalize_L2(X)
-    idx = faiss.IndexFlatIP(X.shape[1])
-    idx.add(X)
-    return {"index": idx, "chunks": cleaned, "emb": emb}
+    # On transforme chaque chunk en Document
+    docs = [Document(page_content=c, metadata={"source": "hetero"}) for c in cleaned]
+
+    # On crée la DB Chroma en mémoire
+    vs = Chroma.from_documents(
+        documents=docs,
+        embedding=emb,
+        collection_name="hetero_rag"
+    )
+
+    retr = vs.as_retriever(
+        search_type="mmr",
+        search_kwargs={"k": 6, "fetch_k": 20, "lambda_mult": 0.5}
+    )
+
+    return {"retriever": retr, "chunks": cleaned, "emb": emb}
+
 
 
 def _hetero_search(vs, q: str, k: int = 6):
-    if not vs or not vs.get("index") or not vs.get("chunks"):
+    if not vs or not vs.get("retriever"):
         return []
-    q = re.sub(r"\s+", " ", q or "").strip()
-    q = _tok_truncate(q, 480)
-    qv = _embed_text_token_safe(vs["emb"], q)
-    Q = np.array([qv], dtype="float32")
-    faiss.normalize_L2(Q)
-    D, I = vs["index"].search(Q, k)
+
+    query = re.sub(r"\s+", " ", q or "").strip()
+    query = _tok_truncate(query, 480)
+
+    docs = vs["retriever"].get_relevant_documents(query)
+
     out = []
-    for rank, ix in enumerate(I[0].tolist()):
-        if ix < 0:
-            continue
-        out.append((vs["chunks"][ix], D[0][rank]))
+    for d in docs[:k]:
+        out.append((d.page_content, 1.0))  # score optionnel
     return out
 
 
@@ -694,7 +702,7 @@ def _get_hetero_vs_cached():
     if SHOW_DEBUG:
         st.write(f"ℹ️ Hétérogène: {len(chunks)} chunks | Locaux: {len(present_local_docs)} | URLs: {len(DEFAULT_RAG_URLS)}")
 
-    vs = _hetero_build_vs(chunks) if chunks else {"index": None, "chunks": [], "emb": _get_global_emb()}
+    vs = _hetero_build_vs(chunks)
     st.session_state["_het_vs"] = {"vs": vs, "present_local": present_local_docs}
     return st.session_state["_het_vs"]
 
@@ -792,7 +800,7 @@ def rag_hetero_generate(code_pas_green: str, temperature: float = 0.25, max_toke
 
 
 # ───────────────────────────── RAG Simple / AST (KB Excel) ─────────────────────────────
-def build_faiss_from_kb(df: pd.DataFrame):
+def build_chroma_from_kb(df: pd.DataFrame):
     emb = _get_global_emb()
 
     def row_to_text(r):
@@ -818,16 +826,28 @@ def build_faiss_from_kb(df: pd.DataFrame):
     splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
         encoding_name="cl100k_base", chunk_size=340, chunk_overlap=48
     )
+
     chunks=[]
+    metadatas=[]
     for d in docs:
         for c in splitter.split_text(d.page_content):
-            chunks.append(Document(page_content=c, metadata=d.metadata))
+            chunks.append(c)
+            metadatas.append(d.metadata)
 
-    vs = FAISS.from_documents(chunks, emb)
+    # ↑ On transforme en documents texte + metadata
+
+    vs = Chroma.from_texts(
+        texts=chunks,
+        embedding=emb,
+        metadatas=metadatas,
+        collection_name="kb_green"
+    )
+
     retr = vs.as_retriever(
         search_type="mmr",
         search_kwargs={"k": 8, "fetch_k": 32, "lambda_mult": 0.5}
     )
+
     return retr
 
 def resolve_kb_path_for_simple() -> str | None:
@@ -884,12 +904,12 @@ load_kb_ast_once()
 # build FAISS (cache retriever pour la session)
 if st.session_state.get("kb_df_loaded_simple") and not st.session_state.get("kb_faiss_ready_simple"):
     with st.spinner("Chargement..."):
-        st.session_state.retriever_simple = build_faiss_from_kb(st.session_state.kb_df_simple)
+        st.session_state.retriever_simple = build_chroma_from_kb(st.session_state.kb_df_simple)
         st.session_state.kb_faiss_ready_simple = True
 
 if st.session_state.get("kb_df_loaded_ast") and not st.session_state.get("kb_faiss_ready_ast"):
     with st.spinner("Chargement..."):
-        st.session_state.retriever_ast = build_faiss_from_kb(st.session_state.kb_df_ast)
+        st.session_state.retriever_ast = build_chroma_from_kb(st.session_state.kb_df_ast)
         st.session_state.kb_faiss_ready_ast = True
 
 def _sanitize_changes(text: str) -> str:
