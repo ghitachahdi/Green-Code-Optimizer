@@ -14,3 +14,4 @@ python-dotenv
 langchain==0.3.7
 langchain-community==0.3.7
 chromadb
+pypdf
