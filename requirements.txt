@@ -17,3 +17,4 @@ chromadb
 pypdf
 html2text
 langchain-nvidia-ai-endpoints
+openpyxl
